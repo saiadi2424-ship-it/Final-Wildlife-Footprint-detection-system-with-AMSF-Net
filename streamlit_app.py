@@ -20,21 +20,24 @@ st.set_page_config(
 
 # Base directories
 BASE_DIR = Path(__file__).resolve().parent
-MODEL_DIR = BASE_DIR / "model"
+sys.path.append(str(BASE_DIR))
+sys.path.append(str(BASE_DIR / "model"))
+
+# Look for weights in both root and model/weights/
+def resolve_weights_path():
+    candidates = [
+        BASE_DIR / "best_amsfnet_exp2.pth",
+        BASE_DIR / "model" / "weights" / "best_amsfnet_exp2.pth",
+        Path("best_amsfnet_exp2.pth"),
+        Path("model/weights/best_amsfnet_exp2.pth"),
+    ]
+    for p in candidates:
+        if p.exists() and p.is_file():
+            return p
+    return None
+
+WEIGHTS_PATH = resolve_weights_path()
 TEST_IMAGES_DIR = BASE_DIR / "test_images"
-WEIGHTS_PATH = MODEL_DIR / "weights" / "best_amsfnet_exp2.pth"
-
-sys.path.append(str(MODEL_DIR))
-
-# Try importing torch and AMSFNet
-try:
-    import torch
-    import torchvision.transforms as transforms
-    from amsfnet import AMSFNet, get_model
-    TORCH_AVAILABLE = True
-except Exception as e:
-    TORCH_AVAILABLE = False
-    TORCH_ERROR = str(e)
 
 # Project Constants
 CLASSES = ["Deer", "Tiger", "Wolf"]
@@ -43,6 +46,16 @@ MODEL_NAME = "AMSF-Net"
 MODEL_FULL_NAME = "Adaptive Multi-Scale Feature Fusion Network"
 TRAINABLE_PARAMETERS = 155173
 VALIDATION_ACCURACY = 84.13
+
+# Import PyTorch and AMSFNet
+try:
+    import torch
+    import torchvision.transforms as transforms
+    from model import AMSFNet
+    TORCH_AVAILABLE = True
+except Exception as e:
+    TORCH_AVAILABLE = False
+    TORCH_ERROR = str(e)
 
 # Custom CSS for Dark Modern Aesthetics
 st.markdown("""
@@ -185,102 +198,96 @@ if "history" not in st.session_state:
         {
             "ID": 101,
             "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "Species": "Tiger",
-            "Confidence": 93.8,
-            "Inference Time": "36.2 ms",
-            "Source": "Raspberry Pi 3",
-            "Device": "Edge CPU"
+            "Species": "Deer",
+            "Confidence": 99.64,
+            "Inference Time": "35.2 ms",
+            "Source": "Test Dataset (22_jpg)",
+            "Device": "CPU"
         },
         {
             "ID": 102,
             "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "Species": "Deer",
-            "Confidence": 89.4,
-            "Inference Time": "39.1 ms",
-            "Source": "Web Upload",
-            "Device": "Web Engine"
+            "Species": "Tiger",
+            "Confidence": 96.69,
+            "Inference Time": "36.4 ms",
+            "Source": "Test Dataset (54_jpg)",
+            "Device": "CPU"
         },
         {
             "ID": 103,
             "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "Species": "Wolf",
-            "Confidence": 91.2,
-            "Inference Time": "37.5 ms",
-            "Source": "Raspberry Pi 3",
-            "Device": "Edge CPU"
+            "Confidence": 69.50,
+            "Inference Time": "37.1 ms",
+            "Source": "Test Dataset (116_jpg)",
+            "Device": "CPU"
         }
     ]
 
 if "hardware_mode" not in st.session_state:
     st.session_state.hardware_mode = "Simulation / Demo"
 
-# Model Cache Loader
-@st.cache_resource
+# Model Cache Loader with explicit error reporting
+@st.cache_resource(show_spinner="Loading AMSF-Net Trained Weights...")
 def load_amsfnet_model():
     if not TORCH_AVAILABLE:
-        return None
+        return None, None, "PyTorch is not installed in the environment."
+        
+    weights_path = resolve_weights_path()
+    if weights_path is None:
+        return None, None, "Weights file 'best_amsfnet_exp2.pth' not found in workspace root or model/weights/."
+
     try:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = get_model(
-            weights_path=str(WEIGHTS_PATH) if WEIGHTS_PATH.exists() else None,
-            num_classes=len(CLASSES),
-            device=device
-        )
-        return model, device
+        checkpoint = torch.load(str(weights_path), map_location=device)
+        
+        # Extract class names if available
+        ckpt_classes = checkpoint.get("class_names", ["deer", "tiger", "wolf"])
+        class_names = [c.capitalize() for c in ckpt_classes]
+        
+        # Instantiate exact AMSFNet architecture
+        model = AMSFNet(num_classes=len(class_names))
+        
+        # Load weights
+        state_dict = checkpoint.get("model_state_dict", checkpoint)
+        model.load_state_dict(state_dict)
+        model.to(device)
+        model.eval()
+        
+        return model, device, None
     except Exception as e:
-        st.warning(f"PyTorch model initialization notice: {e}")
-        return None
+        return None, None, f"Failed to load state_dict: {e}"
+
+# Load the model
+model, device, model_error = load_amsfnet_model()
 
 # Inference Function
-def run_amsfnet_inference(image: Image.Image, filename: str = ""):
-    model_data = load_amsfnet_model()
+def run_amsfnet_inference(image: Image.Image):
+    if model is None:
+        raise RuntimeError(model_error or "Model is not loaded.")
+        
+    transform = transforms.Compose([
+        transforms.Resize(INPUT_SIZE),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
     
-    # 1. Run actual PyTorch tensor pipeline if available
-    if model_data is not None:
-        model, device = model_data
-        transform = transforms.Compose([
-            transforms.Resize(INPUT_SIZE),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
-        rgb_image = image.convert("RGB")
-        tensor = transform(rgb_image).unsqueeze(0).to(device)
+    rgb_image = image.convert("RGB")
+    tensor = transform(rgb_image).unsqueeze(0).to(device)
+    
+    start_time = time.perf_counter()
+    with torch.no_grad():
+        outputs = model(tensor)
+        probs_raw = torch.softmax(outputs, dim=1)[0]
+    end_time = time.perf_counter()
+    inference_time_ms = round((end_time - start_time) * 1000, 2)
+    
+    top_idx = int(torch.argmax(probs_raw).item())
+    species = CLASSES[top_idx]
+    conf = round(float(probs_raw[top_idx]) * 100, 2)
+    probs = {CLASSES[i]: round(float(probs_raw[i]) * 100, 2) for i in range(len(CLASSES))}
         
-        start_time = time.perf_counter()
-        with torch.no_grad():
-            outputs = model(tensor)
-            probs_raw = torch.softmax(outputs, dim=1)[0]
-        end_time = time.perf_counter()
-        inference_time_ms = round((end_time - start_time) * 1000, 2)
-        
-        top_idx = int(torch.argmax(probs_raw).item())
-        species = CLASSES[top_idx]
-        conf = round(float(probs_raw[top_idx]) * 100, 2)
-        probs = {CLASSES[i]: round(float(probs_raw[i]) * 100, 2) for i in range(len(CLASSES))}
-            
-        return species, conf, probs, inference_time_ms, str(device)
-    else:
-        # Fallback simulation
-        time.sleep(0.04) # 40ms simulation
-        name_lower = filename.lower()
-        if "tiger" in name_lower:
-            species = "Tiger"
-            conf = 92.4
-            probs = {"Tiger": 92.4, "Wolf": 4.8, "Deer": 2.8}
-        elif "deer" in name_lower:
-            species = "Deer"
-            conf = 88.7
-            probs = {"Deer": 88.7, "Wolf": 6.9, "Tiger": 4.4}
-        elif "wolf" in name_lower:
-            species = "Wolf"
-            conf = 90.5
-            probs = {"Wolf": 90.5, "Deer": 5.3, "Tiger": 4.2}
-        else:
-            species = "Tiger"
-            conf = 89.5
-            probs = {"Tiger": 89.5, "Deer": 5.7, "Wolf": 4.8}
-            
-        return species, conf, probs, 38.5, "CPU (Simulated)"
+    return species, conf, probs, inference_time_ms, str(device)
 
 # ----------------- SIDEBAR -----------------
 with st.sidebar:
@@ -318,24 +325,27 @@ with st.sidebar:
     st.session_state.hardware_mode = hardware_mode
     
     st.markdown("---")
-    st.markdown("<p style='font-size: 0.8rem; font-weight: 700; color: #94a3b8; text-transform: uppercase;'>System Health</p>", unsafe_allow_html=True)
+    st.markdown("<p style='font-size: 0.8rem; font-weight: 700; color: #94a3b8; text-transform: uppercase;'>Model & Engine Status</p>", unsafe_allow_html=True)
     
-    if TORCH_AVAILABLE:
-        st.markdown("""
-            <div style='background: rgba(16, 185, 129, 0.15); border: 1px solid #10b981; border-radius: 8px; padding: 8px 12px; font-size: 0.8rem; color: #34d399;'>
-                ● <strong>PyTorch Engine:</strong> Active<br>
-                ● <strong>Architecture:</strong> AMSF-Net<br>
-                ● <strong>Parameters:</strong> 155,173
+    if model is not None:
+        st.markdown(f"""
+            <div style='background: rgba(16, 185, 129, 0.15); border: 1px solid #10b981; border-radius: 8px; padding: 10px 12px; font-size: 0.8rem; color: #34d399;'>
+                ● <strong>Model:</strong> AMSF-Net (Active)<br>
+                ● <strong>Weights:</strong> best_amsfnet_exp2.pth<br>
+                ● <strong>Validation Acc:</strong> 84.13%<br>
+                ● <strong>Parameters:</strong> 155,173<br>
+                ● <strong>Device:</strong> {device}
             </div>
         """, unsafe_allow_html=True)
     else:
-        st.markdown("""
-            <div style='background: rgba(245, 158, 11, 0.15); border: 1px solid #f59e0b; border-radius: 8px; padding: 8px 12px; font-size: 0.8rem; color: #fbbf24;'>
-                ● <strong>Engine:</strong> Fallback Simulation Mode
+        st.markdown(f"""
+            <div style='background: rgba(244, 63, 94, 0.15); border: 1px solid #f43f5e; border-radius: 8px; padding: 10px 12px; font-size: 0.8rem; color: #fb7185;'>
+                ● <strong>Model Status:</strong> Error Loading<br>
+                <small>{model_error}</small>
             </div>
         """, unsafe_allow_html=True)
         
-    st.markdown("<br><div style='font-size: 0.72rem; color: #64748b; text-align: center;'>Version 2.0 • Streamlit Cloud Edition</div>", unsafe_allow_html=True)
+    st.markdown("<br><div style='font-size: 0.72rem; color: #64748b; text-align: center;'>Version 2.2 • Production Trained Weights</div>", unsafe_allow_html=True)
 
 # ----------------- PAGE 1: SYSTEM DASHBOARD -----------------
 if page == "📊 System Dashboard":
@@ -381,7 +391,7 @@ if page == "📊 System Dashboard":
             <div class="metric-card">
                 <div class="metric-title">Validation Accuracy</div>
                 <div class="metric-value" style="color: #34d399;">84.13%</div>
-                <div class="metric-sub">Verified Benchmark</div>
+                <div class="metric-sub">Experiment 2 Verified Benchmark</div>
             </div>
         """, unsafe_allow_html=True)
         
@@ -391,8 +401,8 @@ if page == "📊 System Dashboard":
     with col_left:
         st.markdown("### 🔍 System Capabilities")
         st.markdown("""
-        - **Multi-Scale Feature Extraction:** Captures fine-grained animal track geometries (claw marks, pad cushions, stride impressions) across parallel 1×1, 3×3, and 5×5 receptive fields.
-        - **Channel Attention Calibration:** Automatically highlights discriminative footprint characteristics while suppressing background soil, gravel, and sand noise.
+        - **Multi-Scale Feature Extraction:** Captures fine-grained animal track geometries (claw marks, pad cushions, stride impressions) across parallel 3×3, 5×5, and dilated 3×3 receptive fields.
+        - **CBAM Attention Calibration:** Channel and spatial attention dynamically highlight discriminative footprint characteristics while suppressing background soil, gravel, and sand noise.
         - **Edge Deployment Ready:** Specifically designed for execution on low-power **Raspberry Pi 3** hardware with sub-45ms inference latency.
         - **Real-Time Telemetry:** Integrates edge camera capture with central cloud monitoring and audit logging.
         """)
@@ -419,7 +429,7 @@ elif page == "🐾 Footprint AI Inference":
     with col_input:
         st.markdown("#### 1. Select Track Source")
         
-        tab_upload, tab_samples = st.tabs(["📂 Upload Image", "⚡ Pre-Loaded Samples"])
+        tab_upload, tab_samples = st.tabs(["📂 Upload Image", "⚡ Pre-Loaded Test Samples"])
         
         selected_image = None
         selected_filename = ""
@@ -434,7 +444,7 @@ elif page == "🐾 Footprint AI Inference":
                 selected_filename = uploaded_file.name
                 
         with tab_samples:
-            st.write("Click a sample to test immediately:")
+            st.write("Verified test samples from dataset:")
             s_col1, s_col2, s_col3 = st.columns(3)
             
             sample_tiger = TEST_IMAGES_DIR / "tiger_footprint.jpg"
@@ -443,19 +453,19 @@ elif page == "🐾 Footprint AI Inference":
             
             with s_col1:
                 if sample_tiger.exists():
-                    st.image(str(sample_tiger), caption="Tiger Track", use_container_width=True)
+                    st.image(str(sample_tiger), caption="Tiger (54_jpg)", use_container_width=True)
                     if st.button("Test Tiger", key="btn_tiger", use_container_width=True):
                         selected_image = Image.open(str(sample_tiger))
                         selected_filename = "tiger_footprint.jpg"
             with s_col2:
                 if sample_deer.exists():
-                    st.image(str(sample_deer), caption="Deer Track", use_container_width=True)
+                    st.image(str(sample_deer), caption="Deer (22_jpg)", use_container_width=True)
                     if st.button("Test Deer", key="btn_deer", use_container_width=True):
                         selected_image = Image.open(str(sample_deer))
                         selected_filename = "deer_footprint.jpg"
             with s_col3:
                 if sample_wolf.exists():
-                    st.image(str(sample_wolf), caption="Wolf Track", use_container_width=True)
+                    st.image(str(sample_wolf), caption="Wolf (116_jpg)", use_container_width=True)
                     if st.button("Test Wolf", key="btn_wolf", use_container_width=True):
                         selected_image = Image.open(str(sample_wolf))
                         selected_filename = "wolf_footprint.jpg"
@@ -473,53 +483,56 @@ elif page == "🐾 Footprint AI Inference":
         st.markdown("#### 2. Classification Decision")
         
         if analyze_btn and selected_image is not None:
-            with st.spinner("Executing AMSF-Net multi-scale forward pass..."):
-                species, conf, probs, inf_time, device = run_amsfnet_inference(selected_image, selected_filename)
+            if model is None:
+                st.error(f"Cannot run inference: {model_error}")
+            else:
+                with st.spinner("Executing AMSF-Net multi-scale forward pass..."):
+                    species, conf, probs, inf_time, dev_str = run_amsfnet_inference(selected_image)
+                    
+                    # Append to session history
+                    st.session_state.history.insert(0, {
+                        "ID": len(st.session_state.history) + 101,
+                        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "Species": species,
+                        "Confidence": conf,
+                        "Inference Time": f"{inf_time} ms",
+                        "Source": selected_filename or "User Upload",
+                        "Device": dev_str
+                    })
+                    
+                badge_class = f"badge-{species.lower()}"
+                st.markdown(f"""
+                    <div class="result-box">
+                        <div style="font-size: 0.8rem; color: #94a3b8; margin-bottom: 8px;">TOP PREDICTION</div>
+                        <div class="{badge_class}">{species.upper()}</div>
+                        <div style="margin-top: 14px; font-size: 1.3rem; font-weight: 700; color: #ffffff;">
+                            {conf}% Confidence
+                        </div>
+                        <div style="font-size: 0.82rem; color: #94a3b8; margin-top: 6px;">
+                            Latency: <strong>{inf_time} ms</strong> • Hardware: <strong>{dev_str}</strong> • Model: <strong>AMSF-Net (Trained)</strong>
+                        </div>
+                    </div>
+                """, unsafe_allow_html=True)
                 
-                # Append to session history
-                st.session_state.history.insert(0, {
-                    "ID": len(st.session_state.history) + 101,
-                    "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "Species": species,
-                    "Confidence": conf,
-                    "Inference Time": f"{inf_time} ms",
-                    "Source": "Web App",
-                    "Device": device
+                st.markdown("<br>#### 📊 Softmax Probability Distribution", unsafe_allow_html=True)
+                
+                chart_data = pd.DataFrame({
+                    "Species": list(probs.keys()),
+                    "Probability (%)": list(probs.values())
                 })
                 
-            badge_class = f"badge-{species.lower()}"
-            st.markdown(f"""
-                <div class="result-box">
-                    <div style="font-size: 0.8rem; color: #94a3b8; margin-bottom: 8px;">TOP PREDICTION</div>
-                    <div class="{badge_class}">{species.upper()}</div>
-                    <div style="margin-top: 14px; font-size: 1.3rem; font-weight: 700; color: #ffffff;">
-                        {conf}% Confidence
-                    </div>
-                    <div style="font-size: 0.82rem; color: #94a3b8; margin-top: 6px;">
-                        Latency: <strong>{inf_time} ms</strong> • Hardware: <strong>{device}</strong> • Model: <strong>AMSF-Net</strong>
-                    </div>
-                </div>
-            """, unsafe_allow_html=True)
-            
-            st.markdown("<br>#### 📊 Softmax Probability Distribution", unsafe_allow_html=True)
-            
-            chart_data = pd.DataFrame({
-                "Species": list(probs.keys()),
-                "Probability (%)": list(probs.values())
-            })
-            
-            chart = alt.Chart(chart_data).mark_bar(cornerRadius=6).encode(
-                x=alt.X("Probability (%):Q", scale=alt.Scale(domain=[0, 100])),
-                y=alt.Y("Species:N", sort="-x"),
-                color=alt.Color("Species:N", scale=alt.Scale(
-                    domain=["Tiger", "Deer", "Wolf"],
-                    range=["#f59e0b", "#10b981", "#6366f1"]
-                ), legend=None),
-                tooltip=["Species", "Probability (%)"]
-            ).properties(height=180)
-            
-            st.altair_chart(chart, use_container_width=True)
-            st.success(f"AMSF-Net classified footprint as **{species}** with {conf}% confidence in {inf_time}ms.")
+                chart = alt.Chart(chart_data).mark_bar(cornerRadius=6).encode(
+                    x=alt.X("Probability (%):Q", scale=alt.Scale(domain=[0, 100])),
+                    y=alt.Y("Species:N", sort="-x"),
+                    color=alt.Color("Species:N", scale=alt.Scale(
+                        domain=["Tiger", "Deer", "Wolf"],
+                        range=["#f59e0b", "#10b981", "#6366f1"]
+                    ), legend=None),
+                    tooltip=["Species", "Probability (%)"]
+                ).properties(height=180)
+                
+                st.altair_chart(chart, use_container_width=True)
+                st.success(f"AMSF-Net classified footprint as **{species}** with {conf}% confidence in {inf_time}ms.")
         else:
             st.info("👈 Upload an image or select a sample track on the left, then click **'Run AMSF-Net Inference'**.")
 
@@ -585,7 +598,7 @@ elif page == "📈 Model Performance":
     
     m1, m2, m3, m4 = st.columns(4)
     with m1:
-        st.metric("Validation Accuracy", "84.13%", delta="Target: >80%")
+        st.metric("Validation Accuracy", "84.13%", delta="Experiment 2 Checkpoint")
     with m2:
         st.metric("Trainable Parameters", "155,173", delta="< 200k Edge Budget")
     with m3:
@@ -624,12 +637,12 @@ elif page == "🔬 AMSF-Net Architecture":
     st.markdown("""
     ### 🧱 Multi-Scale Block Design
     ```
-    Input Feature Map [C_in × H × W]
-           ├──> Branch 1: Conv 1x1 ──> Conv 3x3 (Small spatial receptive field)
-           ├──> Branch 2: Conv 1x1 ──> Conv 5x5 (Large structural receptive field)
-           └──> Branch 3: MaxPool 3x3 ──> Conv 1x1 (Contextual invariant features)
+    Input Feature Map [96 × 14 × 14]
+           ├──> Branch 1: Conv 3x3 (Small spatial receptive field)
+           ├──> Branch 2: Conv 5x5 (Large structural receptive field)
+           └──> Branch 3: Dilated Conv 3x3, rate=2 (Contextual invariant features)
            │
-           └───> Concatenate [Channels Fused] ──> Conv 1x1 ──> Channel Attention
+           └───> Concatenate [288 Channels] ──> Conv 1x1 Fusion ──> CBAM Attention
     ```
     """)
     
