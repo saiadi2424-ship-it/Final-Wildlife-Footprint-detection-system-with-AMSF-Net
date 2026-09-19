@@ -253,25 +253,10 @@ def run_amsfnet_inference(image: Image.Image, filename: str = ""):
         end_time = time.perf_counter()
         inference_time_ms = round((end_time - start_time) * 1000, 2)
         
-        # If unweighted, calibrate with known image label to provide realistic demonstration
-        name_lower = filename.lower()
-        if "tiger" in name_lower:
-            species = "Tiger"
-            conf = 93.8
-            probs = {"Tiger": 93.8, "Wolf": 4.1, "Deer": 2.1}
-        elif "deer" in name_lower:
-            species = "Deer"
-            conf = 89.4
-            probs = {"Deer": 89.4, "Wolf": 6.8, "Tiger": 3.8}
-        elif "wolf" in name_lower:
-            species = "Wolf"
-            conf = 91.2
-            probs = {"Wolf": 91.2, "Deer": 5.1, "Tiger": 3.7}
-        else:
-            top_idx = int(torch.argmax(probs_raw).item())
-            species = CLASSES[top_idx]
-            conf = round(float(probs_raw[top_idx]) * 100, 2)
-            probs = {CLASSES[i]: round(float(probs_raw[i]) * 100, 2) for i in range(len(CLASSES))}
+        top_idx = int(torch.argmax(probs_raw).item())
+        species = CLASSES[top_idx]
+        conf = round(float(probs_raw[top_idx]) * 100, 2)
+        probs = {CLASSES[i]: round(float(probs_raw[i]) * 100, 2) for i in range(len(CLASSES))}
             
         return species, conf, probs, inference_time_ms, str(device)
     else:
@@ -648,16 +633,36 @@ elif page == "🔬 AMSF-Net Architecture":
     ```
     """)
     
-    st.markdown("### 📋 10-Stage Pipeline Breakdown")
+    st.markdown("### 📋 Pipeline Breakdown")
     pipeline_df = pd.DataFrame({
-        "Stage": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        "Stage": [1, 2, 3, 4, 5, 6, 7, 8, 9],
         "Component": [
-            "Stem Conv 1", "Stem Conv 2", "MultiScaleBlock 1", "Pooling 1",
-            "MultiScaleBlock 2", "Pooling 2", "Channel Attention",
-            "Global Avg Pool", "Dropout (0.3)", "Dense Classifier"
+            "Stem Conv", "Feature Block 1", "Feature Block 2", "Feature Block 3",
+            "Multi-Scale Feature Module", "Attention Module (CBAM)",
+            "Global Avg Pool", "Dropout (0.30)", "Dense Classifier"
         ],
-        "Kernel / Op": ["3×3, s=2", "3×3, s=2", "Parallel 1×1, 3×3, 5×5", "MaxPool 2×2", "Parallel 1×1, 3×3, 5×5", "MaxPool 2×2", "Adaptive Squeeze & Excitation", "AdaptiveAvgPool2d(1)", "p=0.3", "Linear(128 → 3)"],
-        "Output Dimension": ["32 × 112 × 112", "64 × 56 × 56", "96 × 56 × 56", "96 × 28 × 28", "128 × 28 × 28", "128 × 14 × 14", "128 × 14 × 14", "128 × 1 × 1", "128", "3 Classes"]
+        "Kernel / Op": [
+            "Conv2d 3×3, s=2, BN, ReLU",
+            "DepthwiseSeparableConv (3×3 DW + 1×1 PW, s=2)",
+            "DepthwiseSeparableConv (3×3 DW + 1×1 PW, s=2)",
+            "DepthwiseSeparableConv (3×3 DW + 1×1 PW, s=2)",
+            "Parallel 3×3, 5×5, Dilated 3×3, 1×1 Fusion",
+            "Channel Attention (MLP) + Spatial Attention (7×7)",
+            "AdaptiveAvgPool2d(1)",
+            "p=0.30",
+            "Linear(96 → 3)"
+        ],
+        "Output Dimension": [
+            "16 × 112 × 112",
+            "32 × 56 × 56",
+            "64 × 28 × 28",
+            "96 × 14 × 14",
+            "96 × 14 × 14",
+            "96 × 14 × 14",
+            "96 × 1 × 1",
+            "96",
+            "3 Classes (Deer, Tiger, Wolf)"
+        ]
     })
     st.dataframe(pipeline_df, use_container_width=True, hide_index=True)
 
